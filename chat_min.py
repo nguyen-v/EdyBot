@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import scrolledtext, messagebox
+from tkinter import scrolledtext, messagebox, Canvas, Frame, Scrollbar
 import cv2
 import threading
 import queue
@@ -46,9 +46,23 @@ try:
 
 except Exception as e:
     print(f"ERROR: Failed to initialize Gemini Client/Chat: {e}")
-    # Avoid showing messagebox if GUI hasn't started
     exit()
 # --- End Configuration ---
+
+# --- Styling Constants ---
+BASE_FONT_SIZE = 12 # << INCREASED FONT SIZE
+APP_FONT = ('Helvetica', BASE_FONT_SIZE)
+APP_FONT_BOLD = ('Helvetica', BASE_FONT_SIZE, 'bold')
+
+BUBBLE_PADX = 10 # Increased padding slightly
+BUBBLE_PADY = 5
+BUBBLE_MARGIN_X = 10
+BUBBLE_MARGIN_Y = 5
+USER_BUBBLE_COLOR = "#007bff" # Blue
+BOT_BUBBLE_COLOR = "#e0e0e0" # Light Gray
+USER_TEXT_COLOR = "white"
+BOT_TEXT_COLOR = "black"
+MAX_BUBBLE_WIDTH_FACTOR = 0.7
 
 
 class MinimalChatApp:
@@ -59,15 +73,16 @@ class MinimalChatApp:
         self.model_id = model_id_ref
         self.safety_settings = safety_settings_ref
         self.root.title(f"Minimal EdyBot ({self.model_id} - Tkinter)")
-        self.root.geometry("1000x600")
+        self.root.geometry("1100x700") # Slightly larger default window
 
         # --- State ---
-        self.attached_image_pil = None # Current image selected by user
-        self.image_sent_with_last_api_call = None # Store image associated with the API call
+        self.attached_image_pil = None
+        self.image_sent_with_last_api_call = None
         self.latest_frame_cv = None
         self.camera_running = True
         self.frame_queue = queue.Queue(maxsize=5)
         self.response_queue = queue.Queue()
+        self._chat_image_references = []
 
         # --- Layout ---
         self._setup_ui()
@@ -78,53 +93,90 @@ class MinimalChatApp:
         self.process_response_queue()
         self.load_initial_prompt()
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        self.chat_canvas.bind("<Configure>", self._on_canvas_configure)
 
     def _setup_ui(self):
         """Creates and arranges the UI elements."""
         main_frame = tk.Frame(self.root)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        # Left side (Chat Area)
-        left_frame = tk.Frame(main_frame, width=600)
+        left_frame = tk.Frame(main_frame, width=700) # Adjusted initial width guess
         left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
 
-        self.chat_display = scrolledtext.ScrolledText(left_frame, wrap=tk.WORD, state='disabled', height=20)
-        self.chat_display.pack(fill=tk.BOTH, expand=True, pady=(0, 5))
-        # Configure tags for message styling
-        self.chat_display.tag_configure('user', foreground='blue', justify='right')
-        self.chat_display.tag_configure('bot', foreground='green', justify='left')
-        # 'image' tag exists mainly as placeholder for image_create, justification is handled by 'user'/'bot' tags
-        self.chat_display.tag_configure('image')
-
-        self.thumbnail_label = tk.Label(left_frame, text="No image attached")
-        self.thumbnail_label.pack(fill=tk.X, pady=(0, 5))
-
-        input_frame = tk.Frame(left_frame)
-        input_frame.pack(fill=tk.X)
-        self.message_entry = tk.Entry(input_frame, width=50)
-        self.message_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
-        self.message_entry.bind("<Return>", self.send_message) # Bind Enter key
-        self.send_button = tk.Button(input_frame, text="Send", command=self.send_message)
-        self.send_button.pack(side=tk.RIGHT)
-
-        # Right side (Camera Feed and Controls)
         right_frame = tk.Frame(main_frame, width=400)
         right_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=(5, 0))
 
-        self.camera_label = tk.Label(right_frame, text="Starting Camera...", bg='grey', width=40, height=20)
+        # --- Pack items within left_frame ---
+
+        # 1. Input area (BOTTOM)
+        input_frame = tk.Frame(left_frame)
+        input_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(5,0))
+        self.message_entry = tk.Entry(input_frame, width=50, font=APP_FONT) # Apply font
+        self.message_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        self.message_entry.bind("<Return>", self.send_message)
+        self.send_button = tk.Button(input_frame, text="Send", command=self.send_message, font=APP_FONT) # Apply font
+        self.send_button.pack(side=tk.RIGHT)
+
+        # 2. Thumbnail preview (BOTTOM, above input)
+        self.thumbnail_label = tk.Label(left_frame, text="No image attached", font=APP_FONT) # Apply font
+        self.thumbnail_label.pack(side=tk.BOTTOM, fill=tk.X, pady=(5, 0))
+
+        # 3. Chat Area (TOP, fills remaining space)
+        chat_area_frame = tk.Frame(left_frame)
+        chat_area_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        self.chat_canvas = tk.Canvas(chat_area_frame, borderwidth=0, background="#ffffff")
+        self.chat_scrollbar = tk.Scrollbar(chat_area_frame, orient="vertical", command=self.chat_canvas.yview)
+        self.scrollable_frame = tk.Frame(self.chat_canvas, background="#ffffff")
+
+        self.scrollable_frame.bind(
+            "<Configure>",
+            lambda e: self.chat_canvas.configure(
+                scrollregion=self.chat_canvas.bbox("all")
+            )
+        )
+        self.canvas_frame_id = self.chat_canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
+        self.chat_canvas.configure(yscrollcommand=self.chat_scrollbar.set)
+
+        self.chat_canvas.pack(side="left", fill="both", expand=True)
+        self.chat_scrollbar.pack(side="right", fill="y")
+
+        self.chat_canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+        self.chat_canvas.bind_all("<Button-4>", self._on_mousewheel)
+        self.chat_canvas.bind_all("<Button-5>", self._on_mousewheel)
+
+        # --- Pack items within right_frame ---
+        self.camera_label = tk.Label(right_frame, text="Starting Camera...", bg='grey', width=40, height=20, font=APP_FONT) # Apply font
         self.camera_label.pack(fill=tk.BOTH, expand=True, pady=(0, 5))
 
         camera_buttons_frame = tk.Frame(right_frame)
         camera_buttons_frame.pack(fill=tk.X)
-        self.attach_button = tk.Button(camera_buttons_frame, text="Attach Picture", command=self.attach_image)
-        self.attach_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 0)) # Attach button fills width
+        self.attach_button = tk.Button(camera_buttons_frame, text="Attach Picture", command=self.attach_image, font=APP_FONT) # Apply font
+        self.attach_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 0))
+
+
+    def _on_canvas_configure(self, event=None):
+         """Reset the canvas window dimensions when canvas resizes."""
+         if event:
+             self.chat_canvas.itemconfig(self.canvas_frame_id, width=event.width)
+
+    def _on_mousewheel(self, event):
+        """Handle mouse wheel scrolling for the chat canvas."""
+        if event.num == 4 or event.delta > 0:
+            self.chat_canvas.yview_scroll(-1, "units")
+        elif event.num == 5 or event.delta < 0:
+            self.chat_canvas.yview_scroll(1, "units")
+
+    def _scroll_to_bottom(self):
+        """Scrolls the chat canvas to the very bottom."""
+        self.chat_canvas.update_idletasks()
+        self.chat_canvas.yview_moveto(1.0)
 
     # --- Camera Handling ---
     def _camera_thread_func(self):
         """Function run in the camera thread to capture frames."""
         cap = None
         try:
-            # Try DirectShow backend for better compatibility on Windows
             cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
             if not cap.isOpened():
                 self.response_queue.put("SYSTEM_ERROR: Could not open camera.")
@@ -133,33 +185,27 @@ class MinimalChatApp:
             while self.camera_running:
                 ret, frame = cap.read()
                 if ret:
-                    self.latest_frame_cv = frame.copy() # Store for capture
-                    # Convert for display (Tkinter uses RGB)
+                    self.latest_frame_cv = frame.copy()
                     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    # Put frame in queue for main thread, handle queue full
                     try:
                         self.frame_queue.put_nowait(rgb_frame)
                     except queue.Full:
                         try:
-                            self.frame_queue.get_nowait() # Discard oldest
-                            self.frame_queue.put_nowait(rgb_frame) # Retry putting
+                            self.frame_queue.get_nowait()
+                            self.frame_queue.put_nowait(rgb_frame)
                         except queue.Empty:
-                            pass # Should not happen concurrently
+                            pass
                 else:
-                    # Report error if frame reading fails
                     self.response_queue.put("SYSTEM_ERROR: Failed to read frame.")
-                    time.sleep(1) # Avoid busy-looping
+                    time.sleep(1)
 
-                # Control frame rate (~30 FPS)
                 time.sleep(0.03)
         except Exception as e:
-            # Report any unexpected errors from the camera thread
             self.response_queue.put(f"SYSTEM_ERROR: Camera Thread Error: {e}")
         finally:
-            # Ensure camera is released
             if cap and cap.isOpened():
                 cap.release()
-            print("Camera thread stopped.") # Log thread exit
+            print("Camera thread stopped.")
 
     def start_camera_thread(self):
         """Starts the camera thread."""
@@ -169,100 +215,96 @@ class MinimalChatApp:
     def update_camera_feed(self):
         """Periodically checks frame queue and updates camera label in UI."""
         try:
-            # Process all frames currently in the queue
             while not self.frame_queue.empty():
                 rgb_frame = self.frame_queue.get_nowait()
                 img = Image.fromarray(rgb_frame)
-
-                # Resize image to fit the label dimensions while maintaining aspect ratio
                 label_w = self.camera_label.winfo_width()
                 label_h = self.camera_label.winfo_height()
-                # Avoid division by zero or resizing before label is drawn
                 if label_w > 1 and label_h > 1:
                     img.thumbnail((label_w, label_h), Image.Resampling.LANCZOS)
 
-                # Convert PIL image to Tkinter PhotoImage
                 imgtk = ImageTk.PhotoImage(image=img)
-                # Keep a reference to prevent garbage collection!
                 self.camera_label.imgtk = imgtk
-                # Update the label content and size
                 self.camera_label.config(image=imgtk, width=imgtk.width(), height=imgtk.height())
-
         except queue.Empty:
-            pass # Normal case: no new frame
+            pass
         except Exception as e:
-            # Log error and display indicator on the label
             print(f"Error updating camera feed: {e}")
             self.camera_label.config(image='', text=f"Feed Error:\n{e}")
 
-        # Schedule the next check if the camera should still be running
         if self.camera_running:
-            self.root.after(30, self.update_camera_feed) # Check roughly 30 times/sec
+            self.root.after(30, self.update_camera_feed)
 
     # --- Chat Display ---
+    # *** MODIFIED: Add "Edy" label for bot messages, apply APP_FONT ***
     def add_message(self, sender, message, img_pil=None):
-        """Adds a message (text and/or image) to the chat display, handling alignment."""
-        # Redirect System messages to console log
+        """Adds a message bubble (Frame with Label) to the scrollable chat area."""
         if sender == "System":
             print(f"System: {message}")
             return
 
-        # Enable text widget for modification
-        self.chat_display.config(state='normal')
-        try:
-            if sender == "You":
-                tag = 'user' # Tag for styling and justification
-                prefix = "You: "
-                # Mark the starting position BEFORE inserting anything for this message
-                start_index = self.chat_display.index(tk.END + "-1c") # Get position just before newline
+        align_anchor = 'w' if sender == "Edy" else 'e'
+        bubble_color = BOT_BUBBLE_COLOR if sender == "Edy" else USER_BUBBLE_COLOR
+        text_color = BOT_TEXT_COLOR if sender == "Edy" else USER_TEXT_COLOR
+        label_justify = tk.LEFT if sender == "Edy" else tk.RIGHT
 
-                # Insert text content (if any)
-                if message:
-                    text_to_insert = f"{prefix}{message}"
-                    # Add a space separator if an image will follow the text
-                    if img_pil:
-                        text_to_insert += " "
-                    self.chat_display.insert(tk.END, text_to_insert)
+        # Outer frame for alignment and margins
+        outer_frame = tk.Frame(self.scrollable_frame, bg=self.scrollable_frame.cget('bg'))
+        outer_frame.pack(fill='x', padx=BUBBLE_MARGIN_X, pady=BUBBLE_MARGIN_Y, anchor=align_anchor)
 
-                # Insert image widget (if any) AFTER text on the same conceptual line
-                if img_pil:
-                    img_copy = img_pil.copy()
-                    img_copy.thumbnail((150, 150), Image.Resampling.LANCZOS) # Small chat thumbnail
-                    imgtk = ImageTk.PhotoImage(img_copy)
-                    img_ref_name = f'img_{time.time()}' # Unique name for the image instance
-                    # Store reference to prevent garbage collection by Tkinter
-                    if not hasattr(self.chat_display, 'image_references'):
-                         self.chat_display.image_references = {}
-                    self.chat_display.image_references[img_ref_name] = imgtk
-                    # Embed the image in the text widget
-                    self.chat_display.image_create(tk.END, image=imgtk, name=img_ref_name)
+        # *** Add "Edy" label ONLY for bot messages ***
+        if sender == "Edy":
+            edy_label = tk.Label(
+                outer_frame,
+                text="Edy",
+                font=APP_FONT_BOLD, # Bold font for name
+                fg=BOT_TEXT_COLOR, # Use bot text color or a distinct color
+                bg=self.scrollable_frame.cget('bg') # Match background
+            )
+            # Pack name label above the bubble, aligned left
+            edy_label.pack(anchor='w', pady=(0, 2)) # Small padding below name
 
-                # Insert the final newline character for this message block
-                self.chat_display.insert(tk.END, '\n')
-                # Mark the ending position AFTER inserting everything including the newline
-                end_index = self.chat_display.index(tk.END + "-1c")
+        # Inner frame is the visual bubble
+        bubble_frame = tk.Frame(outer_frame, bg=bubble_color)
+        bubble_frame.pack(anchor=align_anchor)
 
-                # Apply the 'user' tag (with justify='right') to the entire block just inserted
-                self.chat_display.tag_add(tag, start_index, end_index)
+        canvas_width = self.chat_canvas.winfo_width()
+        if canvas_width <= 1:
+            canvas_width = 600 # Adjusted estimate
+        wrap_width = int(canvas_width * MAX_BUBBLE_WIDTH_FACTOR)
 
-            elif sender == "Edy":
-                tag = 'bot' # Tag for styling and justification
-                prefix = "Edy: "
-                # For bot, just insert text and newline with the tag
-                start_index = self.chat_display.index(tk.END + "-1c")
-                self.chat_display.insert(tk.END, f"{prefix}{message}\n")
-                end_index = self.chat_display.index(tk.END + "-1c")
-                # Apply the 'bot' tag to the entire block
-                self.chat_display.tag_add(tag, start_index, end_index)
+        imgtk = None
+        compound_pos = tk.NONE
 
-            # Scroll the chat window to make the latest message visible
-            self.chat_display.see(tk.END)
-        except Exception as e:
-            # Log errors occurring during GUI update
-            print(f"Error adding message to GUI display: {e}")
-        finally:
-            # Disable text widget again to prevent user typing directly
-            self.chat_display.config(state='disabled')
+        if img_pil:
+            try:
+                img_copy = img_pil.copy()
+                img_copy.thumbnail((200, 200), Image.Resampling.LANCZOS)
+                imgtk = ImageTk.PhotoImage(img_copy)
+                self._chat_image_references.append(imgtk)
+                compound_pos = tk.TOP
+            except Exception as e:
+                print(f"Error processing image for chat bubble: {e}")
+                imgtk = None
+
+        # Create the main content Label inside the bubble frame
+        bubble_label = tk.Label(
+            bubble_frame,
+            text=message if message else "",
+            font=APP_FONT, # Apply base font
+            fg=text_color,
+            bg=bubble_color,
+            justify=label_justify,
+            wraplength=wrap_width,
+            padx=BUBBLE_PADX,
+            pady=BUBBLE_PADY,
+            image=imgtk,
+            compound=compound_pos
+        )
+        bubble_label.pack(fill='both', expand=True)
+
+        self.root.after(50, self._scroll_to_bottom)
+
 
     # --- Image Attachment ---
     def attach_image(self):
@@ -270,28 +312,30 @@ class MinimalChatApp:
         if self.latest_frame_cv is not None:
             try:
                 rgb_frame = cv2.cvtColor(self.latest_frame_cv, cv2.COLOR_BGR2RGB)
-                self.attached_image_pil = Image.fromarray(rgb_frame) # Store as current selection
-                print("Image attached by user.") # Log action
+                self.attached_image_pil = Image.fromarray(rgb_frame)
+                print("Image attached by user.")
 
-                # Update the thumbnail preview
                 img_copy = self.attached_image_pil.copy()
-                img_copy.thumbnail((150, 100), Image.Resampling.LANCZOS) # Size for thumbnail label
+                img_copy.thumbnail((150, 100), Image.Resampling.LANCZOS)
                 imgtk = ImageTk.PhotoImage(img_copy)
-                self.thumbnail_label.imgtk = imgtk # Keep reference
-                self.thumbnail_label.config(image=imgtk,
-                                           text=f"Attached ({self.attached_image_pil.width}x{self.attached_image_pil.height})")
+                self.thumbnail_label.imgtk = imgtk
+                # Also update font here if needed, though text changes
+                self.thumbnail_label.config(
+                    image=imgtk,
+                    text=f"Attached ({self.attached_image_pil.width}x{self.attached_image_pil.height})",
+                    font=APP_FONT # Ensure font is reapplied
+                )
             except Exception as e:
-                # Log error, don't show in chat UI
                 print(f"System: Error attaching image: {e}")
-                self._clear_attachment_state() # Reset UI on error
+                self._clear_attachment_state()
         else:
-            # Log if no frame is available
             print("System: No camera frame available to attach.")
 
     def _clear_attachment_state(self):
         """Resets the currently attached image state and thumbnail."""
         self.attached_image_pil = None
-        self.thumbnail_label.config(image='', text="No image attached")
+        self.thumbnail_label.config(image='', text="No image attached", font=APP_FONT) # Reset font too
+
 
     # --- Gemini Interaction ---
     def _send_to_gemini_thread_func(self, parts):
@@ -300,138 +344,102 @@ class MinimalChatApp:
             response = self.chat_session.send_message(message=parts)
             response_text = response.text
         except Exception as e:
-            # Prefix API errors for identification in the queue processor
             response_text = f"SYSTEM_ERROR: Gemini API Error: {e}"
-            print(f"Gemini API Error: {e}") # Also log raw error
-        # Put result (or error) into the queue for the main thread
+            print(f"Gemini API Error: {e}")
         self.response_queue.put(response_text)
 
     def process_response_queue(self):
-        """Checks queue for Gemini responses or thread errors and updates UI."""
+        """Checks queue for Gemini responses or errors and updates UI/logs."""
         try:
-            # Non-blocking check for items in the queue
             response_text = self.response_queue.get_nowait()
 
-            # Handle system errors reported from threads (log to console)
             if response_text.startswith("SYSTEM_ERROR:"):
                 print(f"System: {response_text.replace('SYSTEM_ERROR:', '').strip()}")
             else:
-                # Add valid Gemini response to chat display
-                self.add_message("Edy", response_text)
+                self.add_message("Edy", response_text) # Add bot bubble
 
-                # Check for password trigger within the bot's response
                 if "ED, ED, EDY" in response_text:
-                    print("Password 'ED, ED, EDY' detected in response!") # Log detection
-                    print("System: Password detected! Initiating print and reset sequence...") # Log action
+                    print("Password 'ED, ED, EDY' detected in response!")
+                    print("System: Password detected! Initiating print and reset sequence...")
 
-                    # Get the image context associated with the API call that triggered this response
                     image_to_print_now = self.image_sent_with_last_api_call
-
                     if image_to_print_now:
-                        # Schedule the print function with the correct image context
                         self.root.after(100, lambda img=image_to_print_now: self.print_image(image_override=img))
                     else:
-                        # Log if password found but no image was sent
                         print("System: Password detected, but no image was sent with the triggering message.")
 
-                    # Schedule the chat reset after a delay
                     self.root.after(15000, self.reset_chat)
-
-                    # Clear the context *after* scheduling actions that use it
                     self.image_sent_with_last_api_call = None
 
         except queue.Empty:
-            pass # Normal case: no new response/error
+            pass
         except Exception as e:
-            # Log any errors occurring during queue processing itself
             print(f"Error processing response queue: {e}")
 
-        # Schedule the next check
         self.root.after(100, self.process_response_queue)
 
     def send_message(self, event=None):
         """Prepares and sends user message (text/image) to Gemini."""
         user_text = self.message_entry.get().strip()
-        # Capture the currently selected image at the time of sending
         current_attached_image = self.attached_image_pil
 
-        # Do nothing if there's no text and no image attached
         if not user_text and current_attached_image is None:
             return
 
-        message_parts = [] # List to hold parts for the API call
-
-        # Prepare a copy for display (don't modify the original attached image)
+        message_parts = []
         display_img_copy = current_attached_image.copy() if current_attached_image else None
-        # Add user's input (text and/or image) to the chat display immediately
-        self.add_message("You", user_text, img_pil=display_img_copy)
+        self.add_message("You", user_text, img_pil=display_img_copy) # Add user bubble
 
-        # Reset the context for the *next* potential API call before processing this one
-        self.image_sent_with_last_api_call = None
+        self.image_sent_with_last_api_call = None # Reset context
 
-        # Process the image if one was attached when send was triggered
         if current_attached_image:
             try:
                 img_byte_arr = io.BytesIO()
-                # Ensure image is RGB before saving as JPEG
                 rgb_image = current_attached_image
                 if rgb_image.mode != 'RGB':
                     rgb_image = rgb_image.convert('RGB')
                 rgb_image.save(img_byte_arr, format='JPEG', quality=90)
                 img_bytes = img_byte_arr.getvalue()
                 message_parts.append(Part.from_bytes(img_bytes, mime_type="image/jpeg"))
-
-                # *** Store a COPY of the image being sent for this specific API call context ***
                 self.image_sent_with_last_api_call = current_attached_image.copy()
-                print(f"Image part prepared ({len(img_bytes)} bytes). Context stored.") # Log action
-
+                print(f"Image part prepared ({len(img_bytes)} bytes). Context stored.")
             except Exception as e:
-                # Log error and prevent sending if image processing fails
                 print(f"System: Error processing image for sending: {e}")
-                self._clear_attachment_state() # Clear user selection UI on error
-                self.image_sent_with_last_api_call = None # Ensure context is cleared too
-                return # Stop processing this message
+                self._clear_attachment_state()
+                self.image_sent_with_last_api_call = None
+                return
 
-        # Add text part if present
         if user_text:
             message_parts.append(Part(text=user_text))
-            print(f"Text part prepared: '{user_text}'") # Log action
+            print(f"Text part prepared: '{user_text}'")
 
-        # Clear user input field AND the user attachment state/UI
-        # Do this *after* preparing parts and storing context
         self.message_entry.delete(0, tk.END)
-        self._clear_attachment_state() # Clears self.attached_image_pil and UI thumbnail
+        self._clear_attachment_state()
 
-        # Start the API call thread if message parts were created
         if message_parts:
             api_thread = threading.Thread(target=self._send_to_gemini_thread_func, args=(message_parts,), daemon=True)
             api_thread.start()
         else:
-            # This condition should ideally not be met if the initial check passed
             print("Warning: No valid parts generated to send to API.")
 
     # --- Printing ---
     def print_image(self, image_override):
         """Prints the provided image using Windows default printer."""
-        # This function is now only called with an explicit image from the password trigger
         image_to_print = image_override
-
         if image_to_print is None:
-            # Should not happen if called correctly, indicates logic error elsewhere
-            print("Print Error: No image provided to print function (image_override is None).")
+            print("Print Error: No image provided to print function.")
             return
 
-        print(f"Starting print process for image (id: {id(image_to_print)})...") # Log start
+        print(f"Starting print process for image (id: {id(image_to_print)})...")
         temp_path = None
         hDC = None
         try:
             printer_name = win32print.GetDefaultPrinter()
             if not printer_name:
-                print("Print Error: No default printer found.") # Log error
+                print("Print Error: No default printer found.")
                 return
-            print(f"Using printer: {printer_name}") # Log info
+            print(f"Using printer: {printer_name}")
 
-            # Save a copy for record-keeping purposes
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             photo_path = os.path.join(PHOTOS_DIR, f"print_{timestamp}.jpg")
             try:
@@ -441,33 +449,28 @@ class MinimalChatApp:
                 rgb_image_print.save(photo_path, quality=95)
                 print(f"Image saved for record: {photo_path}")
             except Exception as save_err:
-                print(f"Warning: Could not save print copy: {save_err}") # Log warning
+                print(f"Warning: Could not save print copy: {save_err}")
 
-            # Use a temporary BMP file for ImageWin.Dib compatibility
             temp_file = tempfile.NamedTemporaryFile(suffix='.bmp', delete=False)
             temp_path = temp_file.name
-            temp_file.close() # Close handle before saving to it
+            temp_file.close()
             rgb_image_print_bmp = image_to_print
             if rgb_image_print_bmp.mode != 'RGB':
                 rgb_image_print_bmp = rgb_image_print_bmp.convert('RGB')
             rgb_image_print_bmp.save(temp_path, format='BMP')
-            print(f"Using temporary file: {temp_path}") # Log temp file path
+            print(f"Using temporary file: {temp_path}")
 
-            # --- Windows Printing Logic ---
             hDC = win32ui.CreateDC()
             hDC.CreatePrinterDC(printer_name)
-            print("Printer DC created.") # Log DC creation
+            print("Printer DC created.")
 
-            # Get printer dimensions
-            PHYSICALWIDTH = 110
-            PHYSICALHEIGHT = 111
-            printer_width_px = hDC.GetDeviceCaps(PHYSICALWIDTH)
-            printer_height_px = hDC.GetDeviceCaps(PHYSICALHEIGHT)
+            PHYSICALWIDTH=110
+            PHYSICALHEIGHT=111
+            printer_width_px=hDC.GetDeviceCaps(PHYSICALWIDTH)
+            printer_height_px=hDC.GetDeviceCaps(PHYSICALHEIGHT)
 
-            # Load temporary BMP
             bmp = Image.open(temp_path)
 
-            # Simple scaling to fit page while maintaining aspect ratio
             img_w, img_h = bmp.size
             aspect = img_w / img_h
             scaled_w = printer_width_px
@@ -475,68 +478,56 @@ class MinimalChatApp:
             if scaled_h > printer_height_px:
                 scaled_h = printer_height_px
                 scaled_w = int(scaled_h * aspect)
-            # Center image on page
             x_offset = (printer_width_px - scaled_w) // 2
             y_offset = (printer_height_px - scaled_h) // 2
 
-            # Start print job
             hDC.StartDoc(f"EdyBot Print {timestamp}")
             hDC.StartPage()
-
-            # Draw bitmap to printer DC
             dib = ImageWin.Dib(bmp)
             dib.draw(hDC.GetHandleOutput(), (x_offset, y_offset, x_offset + scaled_w, y_offset + scaled_h))
-
-            # End print job
             hDC.EndPage()
             hDC.EndDoc()
-            print("Print job sent.") # Log success
+            print("Print job sent.")
 
         except Exception as e:
-            print(f"ERROR during printing: {e}") # Log any printing error
+            print(f"ERROR during printing: {e}")
         finally:
-            # --- Cleanup ---
-            # Delete printer DC
+            # Cleanup
             if hDC:
                 try:
                     hDC.DeleteDC()
                     print("Printer DC deleted.")
                 except Exception as dc_err:
-                    print(f"Error deleting DC: {dc_err}") # Log cleanup error
-            # Delete temporary file
+                    print(f"Error deleting DC: {dc_err}")
             if temp_path and os.path.exists(temp_path):
                 try:
                     os.unlink(temp_path)
                     print(f"Temporary file deleted: {temp_path}")
                 except Exception as del_err:
-                    # File might be locked by system temporarily
                     print(f"Warning: Could not delete temp file {temp_path}: {del_err}")
 
     # --- Chat Reset ---
     def reset_chat(self):
         """Resets chat display, attachment state, and Gemini session."""
-        print("Resetting chat...") # Log action
-        # Clear UI state related to attachments
+        print("Resetting chat...")
         self._clear_attachment_state()
-        # Clear the image context from the last API call
         self.image_sent_with_last_api_call = None
+        self._chat_image_references.clear()
 
-        # Clear the text display widget
-        self.chat_display.config(state='normal')
-        self.chat_display.delete('1.0', tk.END)
+        # Destroy all existing bubble frames in the scrollable area
+        for widget in self.scrollable_frame.winfo_children():
+            widget.destroy()
+
+        self.chat_canvas.update_idletasks()
+        self.chat_canvas.configure(scrollregion=self.chat_canvas.bbox("all"))
+        self.chat_canvas.yview_moveto(0.0)
 
         try:
-            # Create a completely new backend chat session
             self.chat_session = create_gemini_chat(self.model_id, self.safety_settings)
-            print("New Gemini chat session created.") # Log success
-            # Load the initial prompt into the *new* session after a short delay
+            print("New Gemini chat session created.")
             self.root.after(200, self.load_initial_prompt)
         except Exception as e:
-            # Log error if session creation fails
             print(f"ERROR: Failed to reset Gemini Chat Session: {e}")
-        finally:
-            # Disable display again after reset attempt
-             self.chat_display.config(state='disabled')
 
     # --- Initial Prompt Load ---
     def load_initial_prompt(self):
@@ -547,8 +538,7 @@ class MinimalChatApp:
                 with open(prompt_file, "r", encoding='utf-8') as f:
                     initial_prompt = f.read().strip()
                 if initial_prompt:
-                    print("Sending initial prompt...") # Log action
-                    # Send prompt in background thread
+                    print("Sending initial prompt...")
                     api_thread = threading.Thread(
                         target=self._send_to_gemini_thread_func,
                         args=([Part(text=initial_prompt)],),
@@ -556,39 +546,35 @@ class MinimalChatApp:
                     )
                     api_thread.start()
                 else:
-                    # Log if file is empty
                     print("System: initial_prompt.txt is empty.")
             else:
-                # Log if file not found
                 print("System: initial_prompt.txt not found.")
         except Exception as e:
-            # Log any error during file reading/sending setup
             print(f"System: Error loading initial prompt: {e}")
 
     # --- Closing ---
     def on_closing(self):
         """Handles window close event."""
         print("Closing application...")
-        self.camera_running = False # Signal background threads to stop
-        # Give threads a moment to potentially finish queue writes/checks
+        self.camera_running = False
+        self._chat_image_references.clear()
+        if hasattr(self.thumbnail_label, 'imgtk'):
+            del self.thumbnail_label.imgtk
+        if hasattr(self.camera_label, 'imgtk'):
+            del self.camera_label.imgtk
         time.sleep(0.2)
-        # Destroy the Tkinter window and exit application
         self.root.destroy()
 
 
 # --- Main Execution ---
 if __name__ == "__main__":
-    # Ensure global variables needed by the app class are initialized before creating the app
     if all(var in globals() for var in ['client', 'MODEL_ID', 'safety_settings', 'chat_session']):
         root = tk.Tk()
-        # Pass necessary references to the app instance
         app = MinimalChatApp(root, chat_session, client, MODEL_ID, safety_settings)
-        root.mainloop() # Start the Tkinter event loop
+        root.mainloop()
     else:
-        # Handle critical startup error if Gemini session failed
         print("Critical Error: Global configuration or Gemini session failed during startup. Exiting.")
-        # Show a simple error popup if UI cannot start
         error_root = tk.Tk()
-        error_root.withdraw() # Hide the empty root window
+        error_root.withdraw()
         messagebox.showerror("Startup Error", "Gemini client/session failed. Check console for details.")
         error_root.destroy()
