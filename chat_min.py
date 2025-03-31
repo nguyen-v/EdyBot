@@ -1,5 +1,6 @@
+import customtkinter as ctk
+import tkinter.messagebox as messagebox  # for error popups if needed
 import tkinter as tk
-from tkinter import scrolledtext, messagebox, Canvas, Frame, Scrollbar
 import cv2
 import threading
 import queue
@@ -38,7 +39,7 @@ try:
         """Helper function to create a new Gemini chat session."""
         return client.chats.create(
             model=model_id_to_use,
-            config=GenerateContentConfig(safety_settings=settings)
+            config=GenerateContentConfig(safety_settings=settings, temperature=1)
         )
 
     chat_session = create_gemini_chat(MODEL_ID, safety_settings)
@@ -50,30 +51,52 @@ except Exception as e:
 # --- End Configuration ---
 
 # --- Styling Constants ---
-BASE_FONT_SIZE = 12 # << INCREASED FONT SIZE
+BASE_FONT_SIZE = 16  # Increased font size
 APP_FONT = ('Helvetica', BASE_FONT_SIZE)
 APP_FONT_BOLD = ('Helvetica', BASE_FONT_SIZE, 'bold')
 
-BUBBLE_PADX = 10 # Increased padding slightly
+BUBBLE_PADX = 10  
 BUBBLE_PADY = 5
 BUBBLE_MARGIN_X = 10
 BUBBLE_MARGIN_Y = 5
-USER_BUBBLE_COLOR = "#007bff" # Blue
-BOT_BUBBLE_COLOR = "#e0e0e0" # Light Gray
+USER_BUBBLE_COLOR = "#007bff"  # Blue for user bubbles
+
+# Define dark gray for bot bubbles and camera frame background
+DARK_GRAY = "#555555"  
+# For Edy (bot) messages, use dark gray bubble and white text.
+EDDY_BUBBLE_COLOR = DARK_GRAY
+EDDY_TEXT_COLOR = "white"
+# For user messages, keep existing colors.
 USER_TEXT_COLOR = "white"
-BOT_TEXT_COLOR = "black"
-MAX_BUBBLE_WIDTH_FACTOR = 0.7
+
+# Set max bubble width factor to 0.5 (half of chat pane width)
+MAX_BUBBLE_WIDTH_FACTOR = 0.5
+
+# --- Helper Function for Auto-scroll ---
+def find_canvas(widget):
+    """Recursively searches for a tk.Canvas within a widget's descendants."""
+    if isinstance(widget, tk.Canvas):
+        return widget
+    for child in widget.winfo_children():
+        result = find_canvas(child)
+        if result:
+            return result
+    return None
 
 
 class MinimalChatApp:
     def __init__(self, root, initial_chat_session, client_ref, model_id_ref, safety_settings_ref):
+        self._bubbles = []  # store references to all (frame, label) for bubble
         self.root = root
         self.chat_session = initial_chat_session
         self.client = client_ref
         self.model_id = model_id_ref
         self.safety_settings = safety_settings_ref
-        self.root.title(f"Minimal EdyBot ({self.model_id} - Tkinter)")
-        self.root.geometry("1100x700") # Slightly larger default window
+        self.root.title(f"Minimal EdyBot ({self.model_id} - CustomTkinter)")
+        # self.root.geometry("1920x1080")  # Slightly larger default window
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        self.root.geometry(f"{screen_width}x{screen_height}")
 
         # --- State ---
         self.attached_image_pil = None
@@ -93,84 +116,71 @@ class MinimalChatApp:
         self.process_response_queue()
         self.load_initial_prompt()
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
-        self.chat_canvas.bind("<Configure>", self._on_canvas_configure)
+        self.root.after(100, lambda: self.root.state('zoomed'))
 
     def _setup_ui(self):
-        """Creates and arranges the UI elements."""
-        main_frame = tk.Frame(self.root)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        """Creates and arranges the UI elements using CustomTkinter widgets."""
+        # Main container
+        # Replace your main_frame creation with a PanedWindow.
+        paned_window = tk.PanedWindow(self.root, orient=tk.HORIZONTAL, bg="#222222", sashwidth=5)
+        paned_window.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        left_frame = tk.Frame(main_frame, width=700) # Adjusted initial width guess
-        left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
+        # Create the left frame as a CTkFrame and add it to the paned window.
+        left_frame = ctk.CTkFrame(paned_window, fg_color="#222222")
+        paned_window.add(left_frame, minsize=1200)  # set a minimum size if needed
 
-        right_frame = tk.Frame(main_frame, width=400)
-        right_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=(5, 0))
+        # Create the right frame as a CTkFrame and add it to the paned window.
+        right_frame = ctk.CTkFrame(paned_window, fg_color="#222222")
+        paned_window.add(right_frame, minsize=200)
 
-        # --- Pack items within left_frame ---
-
-        # 1. Input area (BOTTOM)
-        input_frame = tk.Frame(left_frame)
-        input_frame.pack(side=tk.BOTTOM, fill=tk.X, pady=(5,0))
-        self.message_entry = tk.Entry(input_frame, width=50, font=APP_FONT) # Apply font
-        self.message_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
-        self.message_entry.bind("<Return>", self.send_message)
-        self.send_button = tk.Button(input_frame, text="Send", command=self.send_message, font=APP_FONT) # Apply font
-        self.send_button.pack(side=tk.RIGHT)
-
-        # 2. Thumbnail preview (BOTTOM, above input)
-        self.thumbnail_label = tk.Label(left_frame, text="No image attached", font=APP_FONT) # Apply font
-        self.thumbnail_label.pack(side=tk.BOTTOM, fill=tk.X, pady=(5, 0))
-
-        # 3. Chat Area (TOP, fills remaining space)
-        chat_area_frame = tk.Frame(left_frame)
-        chat_area_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-
-        self.chat_canvas = tk.Canvas(chat_area_frame, borderwidth=0, background="#ffffff")
-        self.chat_scrollbar = tk.Scrollbar(chat_area_frame, orient="vertical", command=self.chat_canvas.yview)
-        self.scrollable_frame = tk.Frame(self.chat_canvas, background="#ffffff")
-
-        self.scrollable_frame.bind(
-            "<Configure>",
-            lambda e: self.chat_canvas.configure(
-                scrollregion=self.chat_canvas.bbox("all")
-            )
+        self.left_frame = left_frame  # Save for later use in attach_image
+        # --- Left Frame ---
+        # Chat area using a scrollable frame
+        self.scrollable_frame = ctk.CTkScrollableFrame(
+            left_frame, corner_radius=0, label_text=None, fg_color="#222222"
         )
-        self.canvas_frame_id = self.chat_canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
-        self.chat_canvas.configure(yscrollcommand=self.chat_scrollbar.set)
+        self.scrollable_frame.pack(side=ctk.TOP, fill=ctk.BOTH, expand=True, pady=0)
+        self.chat_canvas = self.scrollable_frame._parent_canvas  # save reference to internal canvas
 
-        self.chat_canvas.pack(side="left", fill="both", expand=True)
-        self.chat_scrollbar.pack(side="right", fill="y")
+        # Input area (BOTTOM)
+        input_frame = ctk.CTkFrame(left_frame, fg_color="#222222")
+        input_frame.pack(side=ctk.BOTTOM, fill=ctk.X, pady=0)  # No vertical padding
+        self.message_entry = ctk.CTkEntry(input_frame, width=50, font=APP_FONT)
+        self.message_entry.pack(side=ctk.LEFT, fill=ctk.X, expand=True, padx=(0, 5))
+        self.message_entry.bind("<Return>", self.send_message)
 
-        self.chat_canvas.bind_all("<MouseWheel>", self._on_mousewheel)
-        self.chat_canvas.bind_all("<Button-4>", self._on_mousewheel)
-        self.chat_canvas.bind_all("<Button-5>", self._on_mousewheel)
+        self.send_button = ctk.CTkButton(
+            input_frame, text="Envoyer", command=self.send_message, font=APP_FONT
+        )
+        self.send_button.pack(side=ctk.RIGHT)
 
-        # --- Pack items within right_frame ---
-        self.camera_label = tk.Label(right_frame, text="Starting Camera...", bg='grey', width=40, height=20, font=APP_FONT) # Apply font
-        self.camera_label.pack(fill=tk.BOTH, expand=True, pady=(0, 5))
+        # Thumbnail preview: initially do not pack this widget
+        # self.thumbnail_label = ctk.CTkLabel(left_frame, text="", font=APP_FONT, fg_color=DARK_GRAY)
 
-        camera_buttons_frame = tk.Frame(right_frame)
-        camera_buttons_frame.pack(fill=tk.X)
-        self.attach_button = tk.Button(camera_buttons_frame, text="Attach Picture", command=self.attach_image, font=APP_FONT) # Apply font
-        self.attach_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 0))
+        # --- Right Frame ---
+        # Camera preview area with dark gray background
+        self.camera_label = ctk.CTkLabel(right_frame, text="Starting Camera...", fg_color=DARK_GRAY,
+                                        font=APP_FONT, justify="center")
+        self.camera_label.pack(fill=ctk.BOTH, expand=True, pady=(0, 5))
 
-
-    def _on_canvas_configure(self, event=None):
-         """Reset the canvas window dimensions when canvas resizes."""
-         if event:
-             self.chat_canvas.itemconfig(self.canvas_frame_id, width=event.width)
-
-    def _on_mousewheel(self, event):
-        """Handle mouse wheel scrolling for the chat canvas."""
-        if event.num == 4 or event.delta > 0:
-            self.chat_canvas.yview_scroll(-1, "units")
-        elif event.num == 5 or event.delta < 0:
-            self.chat_canvas.yview_scroll(1, "units")
+        # Camera control buttons
+        camera_buttons_frame = ctk.CTkFrame(right_frame)
+        camera_buttons_frame.pack(fill=ctk.X)
+        self.attach_button = ctk.CTkButton(camera_buttons_frame, text="Attacher une Image",
+                                           command=self.attach_image, font=APP_FONT)
+        self.attach_button.pack(side=ctk.LEFT, expand=True, fill=ctk.X)
 
     def _scroll_to_bottom(self):
-        """Scrolls the chat canvas to the very bottom."""
-        self.chat_canvas.update_idletasks()
-        self.chat_canvas.yview_moveto(1.0)
+        """Scrolls the chat area to the bottom using the internal canvas."""
+        if self.chat_canvas:
+            self.chat_canvas.update_idletasks()
+            self.chat_canvas.yview_moveto(1.0)
+
+    def _scroll_to_top(self):
+        """Scrolls the chat area to the top using the internal canvas."""
+        if self.chat_canvas:
+            self.chat_canvas.update_idletasks()
+            self.chat_canvas.yview_moveto(0.0)
 
     # --- Camera Handling ---
     def _camera_thread_func(self):
@@ -178,6 +188,8 @@ class MinimalChatApp:
         cap = None
         try:
             cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
             if not cap.isOpened():
                 self.response_queue.put("SYSTEM_ERROR: Could not open camera.")
                 return
@@ -213,7 +225,7 @@ class MinimalChatApp:
         self.camera_thread.start()
 
     def update_camera_feed(self):
-        """Periodically checks frame queue and updates camera label in UI."""
+        """Periodically checks the frame queue and updates the camera preview."""
         try:
             while not self.frame_queue.empty():
                 rgb_frame = self.frame_queue.get_nowait()
@@ -225,90 +237,85 @@ class MinimalChatApp:
 
                 imgtk = ImageTk.PhotoImage(image=img)
                 self.camera_label.imgtk = imgtk
-                self.camera_label.config(image=imgtk, width=imgtk.width(), height=imgtk.height())
+                self.camera_label.configure(image=imgtk, text="")  # remove text when image is available
         except queue.Empty:
             pass
         except Exception as e:
             print(f"Error updating camera feed: {e}")
-            self.camera_label.config(image='', text=f"Feed Error:\n{e}")
+            self.camera_label.configure(image='', text=f"Feed Error:\n{e}")
 
         if self.camera_running:
             self.root.after(30, self.update_camera_feed)
 
     # --- Chat Display ---
-    # *** MODIFIED: Add "Edy" label for bot messages, apply APP_FONT ***
     def add_message(self, sender, message, img_pil=None):
-        """Adds a message bubble (Frame with Label) to the scrollable chat area."""
         if sender == "System":
             print(f"System: {message}")
             return
 
-        align_anchor = 'w' if sender == "Edy" else 'e'
-        bubble_color = BOT_BUBBLE_COLOR if sender == "Edy" else USER_BUBBLE_COLOR
-        text_color = BOT_TEXT_COLOR if sender == "Edy" else USER_TEXT_COLOR
-        label_justify = tk.LEFT if sender == "Edy" else tk.RIGHT
+        if sender == "Edy":
+            bubble_color = EDDY_BUBBLE_COLOR
+            text_color = EDDY_TEXT_COLOR
+        else:
+            bubble_color = USER_BUBBLE_COLOR
+            text_color = USER_TEXT_COLOR
+
+        align = "w" if sender == "Edy" else "e"
 
         # Outer frame for alignment and margins
-        outer_frame = tk.Frame(self.scrollable_frame, bg=self.scrollable_frame.cget('bg'))
-        outer_frame.pack(fill='x', padx=BUBBLE_MARGIN_X, pady=BUBBLE_MARGIN_Y, anchor=align_anchor)
-
-        # *** Add "Edy" label ONLY for bot messages ***
-        if sender == "Edy":
-            edy_label = tk.Label(
-                outer_frame,
-                text="Edy",
-                font=APP_FONT_BOLD, # Bold font for name
-                fg=BOT_TEXT_COLOR, # Use bot text color or a distinct color
-                bg=self.scrollable_frame.cget('bg') # Match background
-            )
-            # Pack name label above the bubble, aligned left
-            edy_label.pack(anchor='w', pady=(0, 2)) # Small padding below name
+        outer_frame = ctk.CTkFrame(self.scrollable_frame, fg_color=self.scrollable_frame.cget("fg_color"))
+        outer_frame.pack(fill="x", padx=BUBBLE_MARGIN_X, pady=BUBBLE_MARGIN_Y, anchor=align)
 
         # Inner frame is the visual bubble
-        bubble_frame = tk.Frame(outer_frame, bg=bubble_color)
-        bubble_frame.pack(anchor=align_anchor)
+        bubble_frame = ctk.CTkFrame(outer_frame, fg_color=bubble_color, corner_radius=10)
+        bubble_frame.pack(anchor=align, padx=5, pady=2)
 
-        canvas_width = self.chat_canvas.winfo_width()
-        if canvas_width <= 1:
-            canvas_width = 600 # Adjusted estimate
-        wrap_width = int(canvas_width * MAX_BUBBLE_WIDTH_FACTOR)
+        # For Edy messages, add the "Edy" label inside the bubble (above the message text)
+        if sender == "Edy":
+            edy_label = ctk.CTkLabel(
+                bubble_frame,
+                text="Edy",
+                font=APP_FONT_BOLD,
+                text_color=EDDY_TEXT_COLOR
+            )
+            # Added padx for padding so that "Edy" is not flush with the bubble's left edge.
+            edy_label.pack(anchor="w", padx=BUBBLE_PADX, pady=(0, 2))
 
+        # Prepare image (if any) for inclusion in the bubble
         imgtk = None
-        compound_pos = tk.NONE
-
+        compound_pos = "none"
         if img_pil:
             try:
                 img_copy = img_pil.copy()
                 img_copy.thumbnail((200, 200), Image.Resampling.LANCZOS)
                 imgtk = ImageTk.PhotoImage(img_copy)
                 self._chat_image_references.append(imgtk)
-                compound_pos = tk.TOP
+                compound_pos = "top"
             except Exception as e:
                 print(f"Error processing image for chat bubble: {e}")
                 imgtk = None
 
-        # Create the main content Label inside the bubble frame
-        bubble_label = tk.Label(
+        # Message text label inside the bubble
+        canvas_width = 1000
+        wrap_width = int(canvas_width * MAX_BUBBLE_WIDTH_FACTOR)
+        bubble_label = ctk.CTkLabel(
             bubble_frame,
             text=message if message else "",
-            font=APP_FONT, # Apply base font
-            fg=text_color,
-            bg=bubble_color,
-            justify=label_justify,
+            font=APP_FONT,
+            text_color=text_color,
             wraplength=wrap_width,
-            padx=BUBBLE_PADX,
-            pady=BUBBLE_PADY,
-            image=imgtk,
-            compound=compound_pos
+            justify="left",
+            compound=compound_pos,
+            image=imgtk
         )
-        bubble_label.pack(fill='both', expand=True)
+        bubble_label.pack(padx=BUBBLE_PADX, pady=BUBBLE_PADY, fill="both", expand=True)
 
         self.root.after(50, self._scroll_to_bottom)
 
 
     # --- Image Attachment ---
     def attach_image(self):
-        """Captures current camera frame and updates thumbnail."""
+        """Captures the current camera frame and updates the thumbnail with a cancel button."""
         if self.latest_frame_cv is not None:
             try:
                 rgb_frame = cv2.cvtColor(self.latest_frame_cv, cv2.COLOR_BGR2RGB)
@@ -318,13 +325,42 @@ class MinimalChatApp:
                 img_copy = self.attached_image_pil.copy()
                 img_copy.thumbnail((150, 100), Image.Resampling.LANCZOS)
                 imgtk = ImageTk.PhotoImage(img_copy)
-                self.thumbnail_label.imgtk = imgtk
-                # Also update font here if needed, though text changes
-                self.thumbnail_label.config(
+                
+                # Remove any existing thumbnail frame
+                if hasattr(self, "thumbnail_frame") and self.thumbnail_frame is not None:
+                    self.thumbnail_frame.destroy()
+                
+                # Create a new frame to contain the thumbnail and the cancel button
+                self.thumbnail_frame = ctk.CTkFrame(self.left_frame, fg_color=DARK_GRAY)
+                self.thumbnail_frame.pack(side=ctk.BOTTOM, fill=ctk.X, pady=(5, 0))
+                
+                # Create the thumbnail image label
+                self.thumbnail_label = ctk.CTkLabel(
+                    self.thumbnail_frame,
                     image=imgtk,
-                    text=f"Attached ({self.attached_image_pil.width}x{self.attached_image_pil.height})",
-                    font=APP_FONT # Ensure font is reapplied
+                    text="",
+                    font=APP_FONT,
+                    fg_color=DARK_GRAY
                 )
+                self.thumbnail_label.image = imgtk  # Keep a reference
+                self.thumbnail_label.pack(side=ctk.LEFT)
+                
+                # Create the cancel (cross) button at the top right of the thumbnail frame
+                self.cancel_button = ctk.CTkButton(
+                    self.thumbnail_frame,
+                    text="X",
+                    width=20,
+                    height=20,
+                    font=("Helvetica", 10),
+                    command=self._clear_attachment_state
+                )
+                # Position the cancel button at the top-right corner
+                self.cancel_button.place(relx=1.0, rely=0.0, anchor="ne")
+                
+                # --- NEW: Scroll chat canvas upward so messages aren't hidden ---
+                if self.chat_canvas:
+                    self._scroll_to_bottom()
+                
             except Exception as e:
                 print(f"System: Error attaching image: {e}")
                 self._clear_attachment_state()
@@ -332,14 +368,16 @@ class MinimalChatApp:
             print("System: No camera frame available to attach.")
 
     def _clear_attachment_state(self):
-        """Resets the currently attached image state and thumbnail."""
+        """Resets the currently attached image state and hides the thumbnail."""
         self.attached_image_pil = None
-        self.thumbnail_label.config(image='', text="No image attached", font=APP_FONT) # Reset font too
+        if hasattr(self, "thumbnail_frame") and self.thumbnail_frame is not None:
+            self.thumbnail_frame.destroy()
+            self.thumbnail_frame = None
 
 
     # --- Gemini Interaction ---
     def _send_to_gemini_thread_func(self, parts):
-        """Sends message parts to Gemini API in a separate thread."""
+        """Sends message parts to the Gemini API in a separate thread."""
         try:
             response = self.chat_session.send_message(message=parts)
             response_text = response.text
@@ -352,25 +390,20 @@ class MinimalChatApp:
         """Checks queue for Gemini responses or errors and updates UI/logs."""
         try:
             response_text = self.response_queue.get_nowait()
-
             if response_text.startswith("SYSTEM_ERROR:"):
                 print(f"System: {response_text.replace('SYSTEM_ERROR:', '').strip()}")
             else:
-                self.add_message("Edy", response_text) # Add bot bubble
-
-                if "ED, ED, EDY" in response_text:
-                    print("Password 'ED, ED, EDY' detected in response!")
+                self.add_message("Edy", response_text)
+                if "MOZZARELLA" in response_text:
+                    print("Password 'MOZZARELLA' detected in response!")
                     print("System: Password detected! Initiating print and reset sequence...")
-
                     image_to_print_now = self.image_sent_with_last_api_call
                     if image_to_print_now:
                         self.root.after(100, lambda img=image_to_print_now: self.print_image(image_override=img))
                     else:
                         print("System: Password detected, but no image was sent with the triggering message.")
-
-                    self.root.after(15000, self.reset_chat)
+                    self.root.after(30000, self.reset_chat)
                     self.image_sent_with_last_api_call = None
-
         except queue.Empty:
             pass
         except Exception as e:
@@ -379,7 +412,7 @@ class MinimalChatApp:
         self.root.after(100, self.process_response_queue)
 
     def send_message(self, event=None):
-        """Prepares and sends user message (text/image) to Gemini."""
+        """Prepares and sends a user message (text/image) to Gemini."""
         user_text = self.message_entry.get().strip()
         current_attached_image = self.attached_image_pil
 
@@ -388,10 +421,9 @@ class MinimalChatApp:
 
         message_parts = []
         display_img_copy = current_attached_image.copy() if current_attached_image else None
-        self.add_message("You", user_text, img_pil=display_img_copy) # Add user bubble
+        self.add_message("You", user_text, img_pil=display_img_copy)
 
-        self.image_sent_with_last_api_call = None # Reset context
-
+        self.image_sent_with_last_api_call = None
         if current_attached_image:
             try:
                 img_byte_arr = io.BytesIO()
@@ -413,11 +445,12 @@ class MinimalChatApp:
             message_parts.append(Part(text=user_text))
             print(f"Text part prepared: '{user_text}'")
 
-        self.message_entry.delete(0, tk.END)
+        self.message_entry.delete(0, ctk.END)
         self._clear_attachment_state()
 
         if message_parts:
-            api_thread = threading.Thread(target=self._send_to_gemini_thread_func, args=(message_parts,), daemon=True)
+            api_thread = threading.Thread(target=self._send_to_gemini_thread_func,
+                                          args=(message_parts,), daemon=True)
             api_thread.start()
         else:
             print("Warning: No valid parts generated to send to API.")
@@ -464,13 +497,12 @@ class MinimalChatApp:
             hDC.CreatePrinterDC(printer_name)
             print("Printer DC created.")
 
-            PHYSICALWIDTH=110
-            PHYSICALHEIGHT=111
-            printer_width_px=hDC.GetDeviceCaps(PHYSICALWIDTH)
-            printer_height_px=hDC.GetDeviceCaps(PHYSICALHEIGHT)
+            PHYSICALWIDTH = 110
+            PHYSICALHEIGHT = 111
+            printer_width_px = hDC.GetDeviceCaps(PHYSICALWIDTH)
+            printer_height_px = hDC.GetDeviceCaps(PHYSICALHEIGHT)
 
             bmp = Image.open(temp_path)
-
             img_w, img_h = bmp.size
             aspect = img_w / img_h
             scaled_w = printer_width_px
@@ -492,7 +524,6 @@ class MinimalChatApp:
         except Exception as e:
             print(f"ERROR during printing: {e}")
         finally:
-            # Cleanup
             if hDC:
                 try:
                     hDC.DeleteDC()
@@ -518,9 +549,8 @@ class MinimalChatApp:
         for widget in self.scrollable_frame.winfo_children():
             widget.destroy()
 
-        self.chat_canvas.update_idletasks()
-        self.chat_canvas.configure(scrollregion=self.chat_canvas.bbox("all"))
-        self.chat_canvas.yview_moveto(0.0)
+        # Schedule scrolling to the top after the widgets are destroyed
+        self.root.after(100, self._scroll_to_top)
 
         try:
             self.chat_session = create_gemini_chat(self.model_id, self.safety_settings)
@@ -529,11 +559,12 @@ class MinimalChatApp:
         except Exception as e:
             print(f"ERROR: Failed to reset Gemini Chat Session: {e}")
 
+
     # --- Initial Prompt Load ---
     def load_initial_prompt(self):
-        """Loads initial prompt from file and sends to current session."""
+        """Loads the initial prompt from file and sends it to the current session."""
         try:
-            prompt_file="initial_prompt.txt"
+            prompt_file = "initial_prompt.txt"
             if os.path.exists(prompt_file):
                 with open(prompt_file, "r", encoding='utf-8') as f:
                     initial_prompt = f.read().strip()
@@ -554,12 +585,10 @@ class MinimalChatApp:
 
     # --- Closing ---
     def on_closing(self):
-        """Handles window close event."""
+        """Handles the window close event."""
         print("Closing application...")
         self.camera_running = False
         self._chat_image_references.clear()
-        if hasattr(self.thumbnail_label, 'imgtk'):
-            del self.thumbnail_label.imgtk
         if hasattr(self.camera_label, 'imgtk'):
             del self.camera_label.imgtk
         time.sleep(0.2)
@@ -569,12 +598,14 @@ class MinimalChatApp:
 # --- Main Execution ---
 if __name__ == "__main__":
     if all(var in globals() for var in ['client', 'MODEL_ID', 'safety_settings', 'chat_session']):
-        root = tk.Tk()
+        root = ctk.CTk()
+        # root.state('zoomed')
+        root.attributes('-fullscreen', True)
         app = MinimalChatApp(root, chat_session, client, MODEL_ID, safety_settings)
         root.mainloop()
     else:
         print("Critical Error: Global configuration or Gemini session failed during startup. Exiting.")
-        error_root = tk.Tk()
+        error_root = ctk.CTk()
         error_root.withdraw()
         messagebox.showerror("Startup Error", "Gemini client/session failed. Check console for details.")
         error_root.destroy()
