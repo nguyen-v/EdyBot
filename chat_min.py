@@ -12,6 +12,7 @@ from PIL import Image, ImageTk, ImageWin
 import time
 import win32print
 import win32ui
+import win32con
 import tempfile
 import io
 import re
