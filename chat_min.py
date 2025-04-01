@@ -14,6 +14,7 @@ import win32print
 import win32ui
 import tempfile
 import io
+import re
 from datetime import datetime
 
 # --- Configuration ---
@@ -83,6 +84,10 @@ def find_canvas(widget):
             return result
     return None
 
+def remove_analysis_blocks(text):
+    pattern = r"ANALYSIS_START.*?ANALYSIS_END[\s\r\n]*"
+    return re.sub(pattern, "", text, flags=re.DOTALL)
+    # return text
 
 class MinimalChatApp:
     def __init__(self, root, initial_chat_session, client_ref, model_id_ref, safety_settings_ref):
@@ -393,7 +398,8 @@ class MinimalChatApp:
             if response_text.startswith("SYSTEM_ERROR:"):
                 print(f"System: {response_text.replace('SYSTEM_ERROR:', '').strip()}")
             else:
-                self.add_message("Edy", response_text)
+                cleaned_response = remove_analysis_blocks(response_text)
+                self.add_message("Edy", cleaned_response)
                 if "MOZZARELLA" in response_text:
                     print("Password 'MOZZARELLA' detected in response!")
                     print("System: Password detected! Initiating print and reset sequence...")
