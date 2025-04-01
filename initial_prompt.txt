@@ -70,7 +70,7 @@ List the number of humans you see in the foreground as: "Number of humans in the
 For <i> in <n_person> in the foreground, format the text as follows:
 PERSON <i>: B=... W=... F=... <Justification> where <i> is the person number, ... must be filled, and <justification> is the justification of why you took that decision.
 
-If W==F, and W!=0, set R=True, else R=False. Mention the computation you do, with numbers.
+If W==F, and W IS NOT 0, set R=True, else R=False. Mention the computation you do, with numbers.
  
 After analysis, you can go back to being Edy.
 You end the analysis with: "ANALYSIS_END"

@@ -479,56 +479,137 @@ class MinimalChatApp:
                 return
             print(f"Using printer: {printer_name}")
 
+            # --- Logo Addition Section (Corrected) ---
+            try:
+                # Load the logo
+                logo_path = "Espace-des-inventions_logo.png" # Make sure this path is correct
+                logo = Image.open(logo_path)
+
+                # <<< CHANGE 1: Ensure logo is in RGBA mode >>>
+                logo = logo.convert("RGBA")
+
+                # <<< CHANGE 2: Ensure base image is in RGBA mode for pasting >>>
+                if image_to_print.mode != 'RGBA':
+                    image_to_print = image_to_print.convert('RGBA')
+
+                # Resize logo (using modern resampling if available)
+                logo_max_width = int(image_to_print.width * 0.2) # Logo width as 20% of image width
+                logo_aspect = logo.width / logo.height
+                logo_width = min(logo.width, logo_max_width)
+                logo_height = int(logo_width / logo_aspect)
+                # Use Image.Resampling.LANCZOS if available (Pillow >= 9.1.0), else fallback
+                resampling_filter = getattr(Image, "Resampling", Image).LANCZOS
+                logo = logo.resize((logo_width, logo_height), resampling_filter)
+
+                # Create a copy to paste onto (already RGBA)
+                combined_image = image_to_print.copy()
+
+                # <<< CHANGE 3: Paste using the logo's alpha channel directly >>>
+                # Pillow's paste uses the alpha channel of the source image (logo)
+                # automatically when pasting onto an RGBA image if the mask argument
+                # is the source image itself.
+                paste_position = (20, 20) # Top-left corner with 20px padding
+                combined_image.paste(logo, paste_position, logo) # Use logo as mask
+
+                # Replace the original image reference with the combined image (still RGBA)
+                image_to_print = combined_image
+                print("Logo added to the image with transparency preserved.")
+
+            except FileNotFoundError:
+                 print(f"Warning: Logo file not found at {logo_path}. Skipping logo addition.")
+            except Exception as logo_err:
+                print(f"Warning: Could not add logo: {logo_err}")
+            # --- End of Logo Addition Section ---
+
+
+            # Save the image with logo for record (JPG format needs RGB)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             photo_path = os.path.join(PHOTOS_DIR, f"print_{timestamp}.jpg")
             try:
-                rgb_image_print = image_to_print
-                if rgb_image_print.mode != 'RGB':
-                    rgb_image_print = rgb_image_print.convert('RGB')
-                rgb_image_print.save(photo_path, quality=95)
+                # <<< CHANGE 4: Convert to RGB before saving as JPG >>>
+                rgb_image_save = image_to_print.convert('RGB')
+                rgb_image_save.save(photo_path, quality=95)
                 print(f"Image saved for record: {photo_path}")
             except Exception as save_err:
                 print(f"Warning: Could not save print copy: {save_err}")
 
+
+            # Create temporary BMP file for printing (BMP usually needs RGB)
             temp_file = tempfile.NamedTemporaryFile(suffix='.bmp', delete=False)
             temp_path = temp_file.name
-            temp_file.close()
-            rgb_image_print_bmp = image_to_print
-            if rgb_image_print_bmp.mode != 'RGB':
-                rgb_image_print_bmp = rgb_image_print_bmp.convert('RGB')
+            temp_file.close() # Close the file handle so Pillow can write to the path
+
+            # <<< CHANGE 5: Convert to RGB before saving as BMP >>>
+            rgb_image_print_bmp = image_to_print.convert('RGB')
             rgb_image_print_bmp.save(temp_path, format='BMP')
             print(f"Using temporary file: {temp_path}")
 
+
+            # Setup printer
             hDC = win32ui.CreateDC()
             hDC.CreatePrinterDC(printer_name)
             print("Printer DC created.")
 
-            PHYSICALWIDTH = 110
-            PHYSICALHEIGHT = 111
-            printer_width_px = hDC.GetDeviceCaps(PHYSICALWIDTH)
-            printer_height_px = hDC.GetDeviceCaps(PHYSICALHEIGHT)
+            PHYSICALWIDTH = hDC.GetDeviceCaps(win32con.PHYSICALWIDTH)  # Use constant
+            PHYSICALHEIGHT = hDC.GetDeviceCaps(win32con.PHYSICALHEIGHT) # Use constant
+            printer_width_px = PHYSICALWIDTH
+            printer_height_px = PHYSICALHEIGHT
 
+            # Load the BMP for printing (already RGB)
             bmp = Image.open(temp_path)
+
+            # Rotate if needed (adjust logic based on desired orientation vs paper size)
+            # Consider if rotation is always needed or depends on aspect ratios
+            print(f"Image size before rotation: {bmp.size}")
+            print(f"Printer physical size: ({printer_width_px}, {printer_height_px})")
+
+            # Landscape printing assumption: rotate if image is portrait (h > w)
+            # This might need adjustment based on printer default orientation & paper
+            if bmp.height > bmp.width:
+                 print("Rotating image 90 degrees for landscape.")
+                 bmp = bmp.rotate(90, expand=True)
+            else:
+                 print("Image already landscape or square, not rotating.")
+
             img_w, img_h = bmp.size
-            aspect = img_w / img_h
-            scaled_w = printer_width_px
-            scaled_h = int(scaled_w / aspect)
-            if scaled_h > printer_height_px:
+            print(f"Image size after potential rotation: {img_w}x{img_h}")
+
+            # Scaling logic (Fit within printer page)
+            img_aspect = img_w / img_h
+            printer_aspect = printer_width_px / printer_height_px
+
+            if img_aspect > printer_aspect:
+                # Image is wider than printer page relative to height -> scale based on width
+                scaled_w = printer_width_px
+                scaled_h = int(scaled_w / img_aspect)
+            else:
+                # Image is taller than printer page relative to width -> scale based on height
                 scaled_h = printer_height_px
-                scaled_w = int(scaled_h * aspect)
+                scaled_w = int(scaled_h * img_aspect)
+
+            print(f"Scaled size for printing: {scaled_w}x{scaled_h}")
+
+            # Centering
             x_offset = (printer_width_px - scaled_w) // 2
             y_offset = (printer_height_px - scaled_h) // 2
+            print(f"Print offsets (X, Y): ({x_offset}, {y_offset})")
 
+            # Print the image
             hDC.StartDoc(f"EdyBot Print {timestamp}")
             hDC.StartPage()
-            dib = ImageWin.Dib(bmp)
+            dib = ImageWin.Dib(bmp) # Pass the potentially rotated BMP image
+            # Draw onto the printer DC
             dib.draw(hDC.GetHandleOutput(), (x_offset, y_offset, x_offset + scaled_w, y_offset + scaled_h))
             hDC.EndPage()
             hDC.EndDoc()
             print("Print job sent.")
 
+        except ImportError:
+            print("ERROR: Missing required libraries (pywin32, Pillow). Please install them.")
         except Exception as e:
-            print(f"ERROR during printing: {e}")
+            import traceback
+            print(f"ERROR during printing process: {e}")
+            traceback.print_exc() # Print detailed traceback for debugging
         finally:
             if hDC:
                 try:
@@ -541,7 +622,8 @@ class MinimalChatApp:
                     os.unlink(temp_path)
                     print(f"Temporary file deleted: {temp_path}")
                 except Exception as del_err:
-                    print(f"Warning: Could not delete temp file {temp_path}: {del_err}")
+                    print(f"Error deleting temporary file {temp_path}: {del_err}")
+
 
     # --- Chat Reset ---
     def reset_chat(self):
