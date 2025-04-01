@@ -566,11 +566,8 @@ class MinimalChatApp:
 
             # Landscape printing assumption: rotate if image is portrait (h > w)
             # This might need adjustment based on printer default orientation & paper
-            if bmp.height > bmp.width:
-                 print("Rotating image 90 degrees for landscape.")
-                 bmp = bmp.rotate(90, expand=True)
-            else:
-                 print("Image already landscape or square, not rotating.")
+            bmp = bmp.rotate(90, expand=True)
+
 
             img_w, img_h = bmp.size
             print(f"Image size after potential rotation: {img_w}x{img_h}")
