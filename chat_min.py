@@ -509,7 +509,7 @@ class MinimalChatApp:
                 # Pillow's paste uses the alpha channel of the source image (logo)
                 # automatically when pasting onto an RGBA image if the mask argument
                 # is the source image itself.
-                paste_position = (20, 20) # Top-left corner with 20px padding
+                paste_position = (100, 30) # Top-left corner with 20px padding
                 combined_image.paste(logo, paste_position, logo) # Use logo as mask
 
                 # Replace the original image reference with the combined image (still RGBA)
