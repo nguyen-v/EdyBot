@@ -90,8 +90,12 @@ def remove_analysis_blocks(text):
     return re.sub(pattern, "", text, flags=re.DOTALL)
     # return text
 
+def remove_code(text):
+    return re.sub(r"MOZZARELLA\r?\n", "", text)
+
 class MinimalChatApp:
-    def __init__(self, root, initial_chat_session, client_ref, model_id_ref, safety_settings_ref):
+    def __init__(self, root, initial_chat_session, client_ref, model_id_ref, safety_settings_ref, training_mode=False):
+        self.training_mode = training_mode
         self._bubbles = []  # store references to all (frame, label) for bubble
         self.root = root
         self.chat_session = initial_chat_session
@@ -400,15 +404,21 @@ class MinimalChatApp:
                 print(f"System: {response_text.replace('SYSTEM_ERROR:', '').strip()}")
             else:
                 cleaned_response = remove_analysis_blocks(response_text)
+                if self.training_mode:
+                    cleaned_response = remove_code(cleaned_response)
                 self.add_message("Edy", cleaned_response)
                 if "MOZZARELLA" in response_text:
                     print("Password 'MOZZARELLA' detected in response!")
-                    print("System: Password detected! Initiating print and reset sequence...")
-                    image_to_print_now = self.image_sent_with_last_api_call
-                    if image_to_print_now:
-                        self.root.after(100, lambda img=image_to_print_now: self.print_image(image_override=img))
+                    # Only print the image if not in training mode
+                    if not self.training_mode:
+                        print("System: Password detected! Initiating print and reset sequence...")
+                        image_to_print_now = self.image_sent_with_last_api_call
+                        if image_to_print_now:
+                            self.root.after(100, lambda img=image_to_print_now: self.print_image(image_override=img))
+                        else:
+                            print("System: Password detected, but no image was sent with the triggering message.")
                     else:
-                        print("System: Password detected, but no image was sent with the triggering message.")
+                        print("Training mode enabled: Skipping image printing.")
                     self.root.after(30000, self.reset_chat)
                     self.image_sent_with_last_api_call = None
         except queue.Empty:
@@ -417,6 +427,7 @@ class MinimalChatApp:
             print(f"Error processing response queue: {e}")
 
         self.root.after(100, self.process_response_queue)
+
 
     def send_message(self, event=None):
         """Prepares and sends a user message (text/image) to Gemini."""
@@ -650,7 +661,8 @@ class MinimalChatApp:
     def load_initial_prompt(self):
         """Loads the initial prompt from file and sends it to the current session."""
         try:
-            prompt_file = "initial_prompt.txt"
+            # Use the training prompt file if training_mode is enabled
+            prompt_file = "initial_prompt_training.txt" if self.training_mode else "initial_prompt.txt"
             if os.path.exists(prompt_file):
                 with open(prompt_file, "r", encoding='utf-8') as f:
                     initial_prompt = f.read().strip()
@@ -663,11 +675,12 @@ class MinimalChatApp:
                     )
                     api_thread.start()
                 else:
-                    print("System: initial_prompt.txt is empty.")
+                    print(f"System: {prompt_file} is empty.")
             else:
-                print("System: initial_prompt.txt not found.")
+                print(f"System: {prompt_file} not found.")
         except Exception as e:
             print(f"System: Error loading initial prompt: {e}")
+
 
     # --- Closing ---
     def on_closing(self):
@@ -683,11 +696,17 @@ class MinimalChatApp:
 
 # --- Main Execution ---
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Run Minimal EdyBot.")
+    parser.add_argument("-t", "--training", action="store_true",
+                        help="Enable training mode: use initial_prompt_training.txt and disable image printing.")
+    args = parser.parse_args()
+
     if all(var in globals() for var in ['client', 'MODEL_ID', 'safety_settings', 'chat_session']):
         root = ctk.CTk()
-        # root.state('zoomed')
         root.attributes('-fullscreen', True)
-        app = MinimalChatApp(root, chat_session, client, MODEL_ID, safety_settings)
+        # Pass the training flag (args.training) to the MinimalChatApp constructor
+        app = MinimalChatApp(root, chat_session, client, MODEL_ID, safety_settings, training_mode=args.training)
         root.mainloop()
     else:
         print("Critical Error: Global configuration or Gemini session failed during startup. Exiting.")
