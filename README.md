@@ -33,8 +33,8 @@ When convinced, Edy gives them the code and prints the valid image (if there is 
 
     You can obtain your API key from [Google AI Studio](https://aistudio.google.com/apikey).
 
-    > [!CAUTION]  
-    > Never share your API Keys (especially in source control. We've added the `.env` file to the `.gitignore` by default as a precaution)
+> [!CAUTION]  
+> Never share your API Keys (especially in source control. We've added the `.env` file to the `.gitignore` by default as a precaution)
 4. **Copy the Shortcut**  
     Once the environment is created, you can copy the `EdyBot.Ink` shortcut to any location you prefer.
 
