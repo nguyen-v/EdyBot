@@ -20,7 +20,9 @@ When convinced, Edy gives them the code and prints the valid image (if there is 
 
 2. **Create the Environment**  
     Run the `create_env.ps1` script to set up the required environment. 
-    
+    ```powershell
+    .\create_env.ps1
+    ```
 
 3. **Add your API key**
     Create a `.env` file in the root directory of the project and add the following line:
@@ -30,9 +32,6 @@ When convinced, Edy gives them the code and prints the valid image (if there is 
     ```
 
     You can obtain your API key from [Google AI Studio](https://aistudio.google.com/apikey).
-    ```powershell
-    .\create_env.ps1
-    ```
 
     > [!CAUTION]  
     > Never share your API Keys (especially in source control. We've added the `.env` file to the `.gitignore` by default as a precaution)
